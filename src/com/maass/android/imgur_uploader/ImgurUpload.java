@@ -18,6 +18,7 @@
 package com.maass.android.imgur_uploader;
 
 import java.io.BufferedReader;
+import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.InputStreamReader;
@@ -32,304 +33,411 @@ import java.util.Random;
 import org.apache.commons.codec_1_4.binary.Base64OutputStream;
 import org.json.JSONObject;
 
-import android.app.Activity;
-import android.app.ProgressDialog;
+import android.app.Notification;
+import android.app.NotificationManager;
+import android.app.PendingIntent;
+import android.app.Service;
+import android.content.ContentValues;
+import android.content.Context;
 import android.content.Intent;
 import android.content.res.AssetFileDescriptor;
-import android.content.res.Configuration;
+import android.database.sqlite.SQLiteDatabase;
+import android.graphics.Bitmap;
 import android.net.Uri;
 import android.os.Bundle;
 import android.os.Handler;
-import android.os.Message;
-import android.text.ClipboardManager;
+import android.os.IBinder;
+import android.provider.MediaStore;
 import android.util.Log;
-import android.view.View;
-import android.view.View.OnClickListener;
-import android.widget.TextView;
-import android.widget.Toast;
+import android.widget.RemoteViews;
 
-public class ImgurUpload extends Activity {
-	private static final int PROGRESS_UPDATE_INTERVAL_MS = 250;
-	private static final int CHUNK_SIZE = 9000;
-	private static final int READ_BUFFER_SIZE_BYTES = (3 * CHUNK_SIZE) / 4;
-	private static final String API_KEY = "e67bb2d5ceb42e43f8f7fc38e7ca7376";
+public class ImgurUpload extends Service {
+    private static final String THUMBNAIL_POSTFIX = ".thumb.jpg";
+    private static final int PROGRESS_UPDATE_INTERVAL_MS = 250;
+    private static final int CHUNK_SIZE = 9000;
+    private static final int READ_BUFFER_SIZE_BYTES = (3 * CHUNK_SIZE) / 4;
+    private static final String API_KEY = "e67bb2d5ceb42e43f8f7fc38e7ca7376";
+    private static final int THUMBNAIL_MAX_SIZE = 200;
 
-	private ProgressDialog mDialogWait;
-	private Map<String, String> mImgurResponse;
+    public static final String BROADCAST_ACTION = "com.maass.android.imgur_uploader.ImageUploadedEvent";
+    private Notification mProgressNotification;
+    private static final int NOTIFICATION_ID = 42;
+    private NotificationManager mNotificationManager;
 
-	private TextView mEditURL;
-	private TextView mEditDelete;
+    private Map<String, String> mImgurResponse;
+    private Uri imageLocation;
 
-	/** Called when the activity is first created. */
-	@Override
-	public void onCreate(Bundle savedInstanceState) {
-		super.onCreate(savedInstanceState);
-		setContentView(R.layout.main);
+    private Handler mHandler = new Handler();
 
-		mEditURL = (TextView) findViewById(R.id.url);
-		mEditDelete = (TextView) findViewById(R.id.delete);
+    @Override
+    public void onStart(final Intent intent, final int startId) {
+        Log.i(this.getClass().getName(), "in onStart(Intent, int)");
+        passIntent(intent);
+    }
 
-		setEventHandlers();
+    @Override
+    public void onCreate() {
+        super.onCreate();
+        mNotificationManager = (NotificationManager) getSystemService(Context.NOTIFICATION_SERVICE);
+    }
 
-		mDialogWait = new ProgressDialog(this);
-		mDialogWait.setProgressStyle(ProgressDialog.STYLE_HORIZONTAL);
-		mDialogWait.setTitle(R.string.uploading_image);
-		mDialogWait.setIcon(R.drawable.icon);
-		mDialogWait.show();
+    @Override
+    public int onStartCommand(final Intent intent, final int flags,
+        final int startId) {
+        Log.i(this.getClass().getName(), "in onStartCommand(Intent, int, int)");
+        passIntent(intent);
+        return START_STICKY_COMPATIBILITY;
+    }
 
-		Thread loadWorker = new Thread() {
-			public void run() {
-				mImgurResponse = handleSendIntent(getIntent());
-				handler.sendEmptyMessage(0);
-			}
-		};
+    private void passIntent(final Intent intent) {
+        try {
+            Log.i(this.getClass().getName(), "in passIntent(Intent)");
 
-		loadWorker.start();
-	}
+            //Start a thread so that android can continue to do things,
+            //services are not a separate thread and will make an application hang
+            final Thread loadWorker = new Thread() {
+                @Override
+                public void run() {
+                    mImgurResponse = handleSendIntent(intent);
+                    handleResponse();
+                }
+            };
 
-	@Override
-	public void onConfigurationChanged(Configuration newConfig) {
-		super.onConfigurationChanged(newConfig);
-		mEditURL = (TextView) findViewById(R.id.url);
-		mEditDelete = (TextView) findViewById(R.id.delete);
-	}
+            loadWorker.start();
 
-	private void setEventHandlers() {
-		// Clicking the url copy button copies the original url
-		// to the global clipboard
-		findViewById(R.id.copyURL).setOnClickListener(new OnClickListener() {
-			public void onClick(View v) {
-				ClipboardManager clipboard = (ClipboardManager) getSystemService(CLIPBOARD_SERVICE);
-				clipboard.setText(mEditURL.getText());
-			}
-		});
+        } finally {
+            stopSelf();
+        }
+    }
 
-		// Clicking url share button displays screen to select how
-		// to share the image link
-		findViewById(R.id.shareURL).setOnClickListener(new OnClickListener() {
-			public void onClick(View v) {
-				Intent shareLinkIntent = new Intent(Intent.ACTION_SEND);
+    private void handleResponse() {
+        Log.i(this.getClass().getName(), "in handleResponse()");
+        // close progress notification
+        mNotificationManager.cancel(NOTIFICATION_ID);
 
-				shareLinkIntent.putExtra(Intent.EXTRA_TEXT, mEditURL.getText()
-						.toString());
-				shareLinkIntent.setType("text/plain");
+        String notificationMessage = getString(R.string.upload_success);
 
-				ImgurUpload.this.startActivity(Intent.createChooser(
-						shareLinkIntent, getResources().getString(
-								R.string.share_via)));
-			}
-		});
+        // notification intent with result
+        final Intent notificationIntent = new Intent(getBaseContext(),
+            ImageDetails.class);
 
-		// Clicking the delete copy button copies the delete url
-		// to the global clipboard
-		findViewById(R.id.copyDelete).setOnClickListener(new OnClickListener() {
-			public void onClick(View v) {
-				ClipboardManager clipboard = (ClipboardManager) getSystemService(CLIPBOARD_SERVICE);
-				clipboard.setText(mEditDelete.getText());
-			}
-		});
+        if (mImgurResponse == null) {
+            notificationMessage = getString(R.string.connection_failed);
+        } else if (mImgurResponse.get("error") != null) {
+            notificationMessage = getString(R.string.unknown_error)
+                + mImgurResponse.get("error");
+        } else {
+            // create thumbnail
+            if (mImgurResponse.get("image_hash").length() > 0) {
+                createThumbnail(imageLocation);
+            }
 
-		// Clicking delete share button displays screen to select how
-		// to share the delete link
-		findViewById(R.id.shareDelete).setOnClickListener(
-				new OnClickListener() {
-					public void onClick(View v) {
-						Intent shareLinkIntent = new Intent(Intent.ACTION_SEND);
+            // store result in database
+            final HistoryDatabase histData = new HistoryDatabase(
+                getBaseContext());
+            final SQLiteDatabase data = histData.getWritableDatabase();
 
-						shareLinkIntent.putExtra(Intent.EXTRA_TEXT, mEditDelete
-								.getText().toString());
-						shareLinkIntent.setType("text/plain");
+            final HashMap<String, String> dataToSave = new HashMap<String, String>();
+            dataToSave.put("delete_hash", mImgurResponse.get("delete_hash"));
+            dataToSave.put("image_url", mImgurResponse.get("original"));
+            final Uri imageUri = Uri.parse(getFilesDir() + "/"
+                + mImgurResponse.get("image_hash") + THUMBNAIL_POSTFIX);
+            dataToSave.put("local_thumbnail", imageUri.toString());
+            dataToSave.put("upload_time", "" + System.currentTimeMillis());
 
-						ImgurUpload.this.startActivity(Intent.createChooser(
-								shareLinkIntent, getResources().getString(
-										R.string.share_via)));
-					}
-				});
-	}
+            for (final Map.Entry<String, String> entry : dataToSave.entrySet()) {
+                final ContentValues content = new ContentValues();
+                content.put("hash", mImgurResponse.get("image_hash"));
+                content.put("key", entry.getKey());
+                content.put("value", entry.getValue());
+                data.insert("imgur_history", null, content);
+            }
 
-	private Handler handler = new Handler() {
-		public void handleMessage(Message msg) {
-			mDialogWait.dismiss();
-			if (mImgurResponse == null) {
-				Toast.makeText(ImgurUpload.this,
-						getResources().getString(R.string.connection_error),
-						Toast.LENGTH_SHORT).show();
-			} else if (mImgurResponse.get("error") != null) {
-				Toast.makeText(ImgurUpload.this, mImgurResponse.get("error"),
-						Toast.LENGTH_SHORT).show();
-			} else {
-				mEditURL.setText(mImgurResponse.get("original"));
-				mEditDelete.setText(mImgurResponse.get("delete"));
-			}
-		}
-	};
+            //set intent to go to image details
+            notificationIntent.putExtra("hash", mImgurResponse
+                .get("image_hash"));
+            notificationIntent.putExtra("image_url", mImgurResponse
+                .get("original"));
+            notificationIntent.putExtra("delete_hash", mImgurResponse
+                .get("delete_hash"));
+            notificationIntent.putExtra("local_thumbnail", imageUri.toString());
 
-	/**
-	 * 
-	 * @return a map that contains objects with the following keys:
-	 * 
-	 *         delete - the url used to delete the uploaded image (null if
-	 *         error).
-	 * 
-	 *         original - the url to the uploaded image (null if error) The map
-	 *         is null if error
-	 */
-	private Map<String, String> handleSendIntent(Intent intent) {
-		Log.d(this.getClass().getName(), intent.toString());
-		Bundle extras = intent.getExtras();
-		try {
-			if (Intent.ACTION_SEND.equals(intent.getAction())
-					&& (extras != null)
-					&& extras.containsKey(Intent.EXTRA_STREAM)) {
+            data.close();
+            histData.close();
 
-				Uri uri = (Uri) extras.getParcelable(Intent.EXTRA_STREAM);
-				if (uri != null) {
-					Log.d(this.getClass().getName(), uri.toString());
-					final String jsonOutput = readPictureDataAndUpload(uri);
-					return parseJSONResponse(jsonOutput);
-				}
-				Log.e(this.getClass().getName(), "URI null");
-			}
-		} catch (Exception e) {
-			Log.e(this.getClass().getName(), "Completely unexpected error", e);
-		}
-		return null;
-	}
+            // if the main activity is already open then refresh the gridview
+            sendBroadcast(new Intent(BROADCAST_ACTION));
+        }
 
-	/**
-	 * This method uploads an image from the given uri. It does the uploading in
-	 * small chunks to make sure it doesn't over run the memory.
-	 * 
-	 * @param uri
-	 *            image location
-	 * @return map containing data from interaction
-	 */
-	private String readPictureDataAndUpload(Uri uri) {
-		try {
-			final AssetFileDescriptor afd = this.getContentResolver()
-					.openAssetFileDescriptor(uri, "r");
-			final long dlen = afd.getLength();
-			afd.close();
-			mDialogWait.setMax((int) dlen);
+        //assemble notification
+        final Notification notification = new Notification(R.drawable.icon,
+            notificationMessage, System.currentTimeMillis());
+        notification.setLatestEventInfo(this, getString(R.string.app_name),
+            notificationMessage, PendingIntent.getActivity(getBaseContext(), 0,
+                notificationIntent, PendingIntent.FLAG_CANCEL_CURRENT));
+        notification.flags |= Notification.FLAG_AUTO_CANCEL;
+        mNotificationManager.notify(NOTIFICATION_ID, notification);
 
-			InputStream inputStream = this.getContentResolver()
-					.openInputStream(uri);
+    }
 
-			final String boundaryString = "Z."
-					+ Long.toHexString(System.currentTimeMillis())
-					+ Long.toHexString((new Random()).nextLong());
-			final String boundary = "--" + boundaryString;
-			HttpURLConnection conn = (HttpURLConnection) (new URL(
-					"http://imgur.com/api/upload.json")).openConnection();
-			conn.setRequestMethod("POST");
-			conn.setRequestProperty("Content-type",
-					"multipart/form-data; boundary=\"" + boundaryString + "\"");
-			conn.setUseCaches(false);
-			conn.setDoInput(true);
-			conn.setDoOutput(true);
-			conn.setChunkedStreamingMode(CHUNK_SIZE);
-			OutputStream hrout = conn.getOutputStream();
-			PrintStream hout = new PrintStream(hrout);
-			hout.println(boundary);
-			hout.println("Content-Disposition: form-data; name=\"key\"");
-			hout.println("Content-Type: text/plain");
-			hout.println();
-			hout.println(API_KEY);
-			hout.println(boundary);
-			hout.println("Content-Disposition: form-data; name=\"image\"");
-			hout.println("Content-Transfer-Encoding: base64");
-			hout.println();
-			hout.flush();
-			{
-				Base64OutputStream bhout = new Base64OutputStream(hrout);
-				byte[] pictureData = new byte[READ_BUFFER_SIZE_BYTES];
-				int read = 0;
-				int totalRead = 0;
-				long lastLogTime = 0;
-				while (read >= 0) {
-					read = inputStream.read(pictureData);
-					if (read > 0) {
-						bhout.write(pictureData, 0, read);
-						totalRead += read;
-						if (lastLogTime < (System.currentTimeMillis() - PROGRESS_UPDATE_INTERVAL_MS)) {
-							lastLogTime = System.currentTimeMillis();
-							Log.d(this.getClass().getName(), "Loaded "
-									+ totalRead + " of " + dlen + " bytes ("
-									+ (100 * totalRead) / dlen + "%)");
-							mDialogWait.setProgress(totalRead);
-						}
-						bhout.flush();
-						hrout.flush();
-					}
-				}
-				Log.d(this.getClass().getName(), "Finishing upload...");
-				// This close is absolutely necessary, this tells the
-				// Base64OutputStream to finish writing the last of the data
-				// (and including the padding). Without this line, it will miss
-				// the last 4 chars in the output, missing up to 3 bytes in the
-				// final output.
-				bhout.close();
-				Log.d(this.getClass().getName(), "Upload complete...");
-				mDialogWait.setProgress(totalRead);
-			}
+    /**
+     * 
+     * @return a map that contains objects with the following keys:
+     * 
+     *         delete - the url used to delete the uploaded image (null if
+     *         error).
+     * 
+     *         original - the url to the uploaded image (null if error) The map
+     *         is null if error
+     */
+    private Map<String, String> handleSendIntent(final Intent intent) {
+        Log.i(this.getClass().getName(), "in handleResponse()");
 
-			hout.println(boundary);
-			hout.flush();
-			hrout.close();
+        Log.d(this.getClass().getName(), intent.toString());
+        final Bundle extras = intent.getExtras();
+        try {
+            //upload a new image
+            if (Intent.ACTION_SEND.equals(intent.getAction())
+                && (extras != null) && extras.containsKey(Intent.EXTRA_STREAM)) {
 
-			inputStream.close();
+                final Uri uri = (Uri) extras.getParcelable(Intent.EXTRA_STREAM);
+                if (uri != null) {
+                    Log.d(this.getClass().getName(), uri.toString());
+                    // store uri so we can create the thumbnail if we succeed
+                    imageLocation = uri;
+                    final String jsonOutput = readPictureDataAndUpload(uri);
+                    return parseJSONResponse(jsonOutput);
+                }
+                Log.e(this.getClass().getName(), "URI null");
+            }
+        } catch (final Exception e) {
+            Log.e(this.getClass().getName(), "Completely unexpected error", e);
+        }
+        return null;
+    }
 
-			Log.d(this.getClass().getName(), "streams closed, "
-					+ "now waiting for response from server");
+    /**
+     * Method to generate the remote view for the progress notification
+     * 
+     * 
+     */
+    private RemoteViews generateProgressNotificationView(final int progress,
+        final int total) {
+        final RemoteViews contentView = new RemoteViews(getPackageName(),
+            R.layout.notification_layout_upload);
+        contentView.setProgressBar(R.id.UploadProgress, total, progress, false);
+        contentView.setTextViewText(R.id.text, "Uploaded " + progress + " of "
+            + total + " bytes");
+        return contentView;
+    }
 
-			BufferedReader reader = new BufferedReader(new InputStreamReader(
-					conn.getInputStream()));
-			StringBuilder rData = new StringBuilder();
-			String line;
-			while ((line = reader.readLine()) != null) {
-				rData.append(line).append('\n');
-			}
+    /**
+     * This method uploads an image from the given uri. It does the uploading in
+     * small chunks to make sure it doesn't over run the memory.
+     * 
+     * @param uri
+     *            image location
+     * @return map containing data from interaction
+     */
+    private String readPictureDataAndUpload(final Uri uri) {
+        Log.i(this.getClass().getName(), "in readPictureDataAndUpload(Uri)");
+        try {
+            final AssetFileDescriptor assetFileDescriptor = getContentResolver()
+                .openAssetFileDescriptor(uri, "r");
+            final int totalFileLength = (int) assetFileDescriptor.getLength();
+            assetFileDescriptor.close();
 
-			return rData.toString();
-		} catch (IOException e) {
-			Log.e(this.getClass().getName(), "Upload failed", e);
-		}
+            // Create custom progress notification
+            mProgressNotification = new Notification(R.drawable.icon,
+                getString(R.string.upload_in_progress), System
+                    .currentTimeMillis());
+            // set as ongoing
+            mProgressNotification.flags |= Notification.FLAG_ONGOING_EVENT;
+            // set custom view to notification
+            mProgressNotification.contentView = generateProgressNotificationView(
+                0, totalFileLength);
+            //empty intent for the notification
+            final Intent progressIntent = new Intent();
+            final PendingIntent contentIntent = PendingIntent.getActivity(this,
+                0, progressIntent, 0);
+            mProgressNotification.contentIntent = contentIntent;
+            // add notification to manager
+            mNotificationManager.notify(NOTIFICATION_ID, mProgressNotification);
 
-		return null;
-	}
+            final InputStream inputStream = getContentResolver()
+                .openInputStream(uri);
 
-	private Map<String, String> parseJSONResponse(String response) {
-		try {
-			Log.d(this.getClass().getName(), response);
+            final String boundaryString = "Z."
+                + Long.toHexString(System.currentTimeMillis())
+                + Long.toHexString((new Random()).nextLong());
+            final String boundary = "--" + boundaryString;
+            final HttpURLConnection conn = (HttpURLConnection) (new URL(
+                "http://imgur.com/api/upload.json")).openConnection();
+            conn.setRequestMethod("POST");
+            conn.setRequestProperty("Content-type",
+                "multipart/form-data; boundary=\"" + boundaryString + "\"");
+            conn.setUseCaches(false);
+            conn.setDoInput(true);
+            conn.setDoOutput(true);
+            conn.setChunkedStreamingMode(CHUNK_SIZE);
+            final OutputStream hrout = conn.getOutputStream();
+            final PrintStream hout = new PrintStream(hrout);
+            hout.println(boundary);
+            hout.println("Content-Disposition: form-data; name=\"key\"");
+            hout.println("Content-Type: text/plain");
+            hout.println();
+            hout.println(API_KEY);
+            hout.println(boundary);
+            hout.println("Content-Disposition: form-data; name=\"image\"");
+            hout.println("Content-Transfer-Encoding: base64");
+            hout.println();
+            hout.flush();
+            {
+                final Base64OutputStream bhout = new Base64OutputStream(hrout);
+                final byte[] pictureData = new byte[READ_BUFFER_SIZE_BYTES];
+                int read = 0;
+                int totalRead = 0;
+                long lastLogTime = 0;
+                while (read >= 0) {
+                    read = inputStream.read(pictureData);
+                    if (read > 0) {
+                        bhout.write(pictureData, 0, read);
+                        totalRead += read;
+                        if (lastLogTime < (System.currentTimeMillis() - PROGRESS_UPDATE_INTERVAL_MS)) {
+                            lastLogTime = System.currentTimeMillis();
+                            Log.d(this.getClass().getName(), "Uploaded "
+                                + totalRead + " of " + totalFileLength
+                                + " bytes (" + (100 * totalRead)
+                                / totalFileLength + "%)");
 
-			JSONObject json = new JSONObject(response);
-			JSONObject data = json.getJSONObject("rsp").getJSONObject("image");
+                            //make a final version of the total read to make the handler happy
+                            final int totalReadFinal = totalRead;
+                            mHandler.post(new Runnable() {
+                                public void run() {
+                                    mProgressNotification.contentView = generateProgressNotificationView(
+                                        totalReadFinal, totalFileLength);
+                                    mNotificationManager.notify(
+                                        NOTIFICATION_ID, mProgressNotification);
+                                }
+                            });
+                        }
+                        bhout.flush();
+                        hrout.flush();
+                    }
+                }
+                Log.d(this.getClass().getName(), "Finishing upload...");
+                // This close is absolutely necessary, this tells the
+                // Base64OutputStream to finish writing the last of the data
+                // (and including the padding). Without this line, it will miss
+                // the last 4 chars in the output, missing up to 3 bytes in the
+                // final output.
+                bhout.close();
+                Log.d(this.getClass().getName(), "Upload complete...");
+                mProgressNotification.contentView.setProgressBar(
+                    R.id.UploadProgress, totalFileLength, totalRead, false);
+            }
 
-			HashMap<String, String> ret = new HashMap<String, String>();
-			ret.put("delete", data.getString("delete_page"));
-			ret.put("original", data.getString("original_image"));
+            hout.println(boundary);
+            hout.flush();
+            hrout.close();
 
-			return ret;
-		} catch (Exception e) {
-			Log.e(this.getClass().getName(),
-					"Error parsing response from imgur", e);
-		}
-		try {
-			Log.d(this.getClass().getName(), response);
+            inputStream.close();
 
-			JSONObject json = new JSONObject(response);
-			JSONObject data = json.getJSONObject("rsp");
+            Log.d(this.getClass().getName(), "streams closed, "
+                + "now waiting for response from server");
 
-			HashMap<String, String> ret = new HashMap<String, String>();
-			ret.put("error", data.getString("error_code") + ", "
-					+ data.getString("stat") + ", "
-					+ data.getString("error_msg"));
+            final BufferedReader reader = new BufferedReader(
+                new InputStreamReader(conn.getInputStream()));
+            final StringBuilder rData = new StringBuilder();
+            String line;
+            while ((line = reader.readLine()) != null) {
+                rData.append(line).append('\n');
+            }
 
-			return ret;
-		} catch (Exception e) {
-			Log.e(this.getClass().getName(), "Error parsing error from imgur",
-					e);
-		}
-		return null;
-	}
+            return rData.toString();
+        } catch (final IOException e) {
+            Log.e(this.getClass().getName(), "Upload failed", e);
+        }
+
+        return null;
+    }
+
+    /**
+     * This method uploads create a thumbnail for local use from the uri
+     * 
+     * @param uri
+     *            image location
+     */
+    private void createThumbnail(final Uri uri) {
+        Log.i(this.getClass().getName(), "in createThumbnail(Uri)");
+        try {
+            final Bitmap image = MediaStore.Images.Media.getBitmap(
+                getContentResolver(), uri);
+            int height = image.getHeight();
+            int width = image.getWidth();
+            if (width > height) {
+                height = height * THUMBNAIL_MAX_SIZE / width;
+                width = THUMBNAIL_MAX_SIZE;
+            } else {
+                width = width * THUMBNAIL_MAX_SIZE / height;
+                height = THUMBNAIL_MAX_SIZE;
+            }
+            final Bitmap resizedBitmap = Bitmap.createScaledBitmap(image,
+                width, height, false);
+
+            final FileOutputStream f = openFileOutput(mImgurResponse
+                .get("image_hash")
+                + THUMBNAIL_POSTFIX, Context.MODE_PRIVATE);
+
+            resizedBitmap.compress(Bitmap.CompressFormat.JPEG, 75, f);
+
+        } catch (final IOException e1) {
+            Log.e(this.getClass().getName(), "Error creating thumbnail", e1);
+        }
+    }
+
+    private Map<String, String> parseJSONResponse(final String response) {
+        Log.i(this.getClass().getName(), "in parseJSONResponse(String)");
+        try {
+            Log.d(this.getClass().getName(), response);
+
+            final JSONObject json = new JSONObject(response);
+            final JSONObject data = json.getJSONObject("rsp").getJSONObject(
+                "image");
+
+            final HashMap<String, String> ret = new HashMap<String, String>();
+            ret.put("delete", data.getString("delete_page"));
+            ret.put("original", data.getString("original_image"));
+            ret.put("delete_hash", data.getString("delete_hash"));
+            ret.put("image_hash", data.getString("image_hash"));
+            ret.put("small_thumbnail", data.getString("small_thumbnail"));
+
+            return ret;
+        } catch (final Exception e) {
+            Log.e(this.getClass().getName(),
+                "Error parsing response from imgur", e);
+        }
+        try {
+            Log.d(this.getClass().getName(), response);
+
+            final JSONObject json = new JSONObject(response);
+            final JSONObject data = json.getJSONObject("rsp");
+
+            final HashMap<String, String> ret = new HashMap<String, String>();
+            ret.put("error", data.getString("error_code") + ", "
+                + data.getString("stat") + ", " + data.getString("error_msg"));
+
+            return ret;
+        } catch (final Exception e) {
+            Log.e(this.getClass().getName(), "Error parsing error from imgur",
+                e);
+        }
+        return null;
+    }
+
+    @Override
+    public IBinder onBind(final Intent arg0) {
+        Log.i(this.getClass().getName(), "in onBind(Intent)");
+        return null;
+    }
 }

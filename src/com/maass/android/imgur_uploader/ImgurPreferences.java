@@ -1,18 +1,13 @@
 package com.maass.android.imgur_uploader;
 
-import android.app.Activity;
 import android.os.Bundle;
+import android.preference.PreferenceActivity;
 
-public class LaunchedInfo extends Activity {
-
-    /**
-     * @see android.app.Activity#onCreate(Bundle)
-     */
+public class ImgurPreferences extends PreferenceActivity {
     @Override
     protected void onCreate(final Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
 
-        setContentView(R.layout.info);
-
+        addPreferencesFromResource(R.xml.preferences);
     }
 }
