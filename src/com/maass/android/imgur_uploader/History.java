@@ -1,15 +1,10 @@
 package com.maass.android.imgur_uploader;
 
-import java.io.BufferedReader;
-import java.io.File;
-import java.io.InputStreamReader;
-import java.net.HttpURLConnection;
-import java.net.URL;
-
-import org.json.JSONObject;
-
 import android.app.Activity;
+import android.content.BroadcastReceiver;
+import android.content.Context;
 import android.content.Intent;
+import android.content.IntentFilter;
 import android.database.Cursor;
 import android.database.sqlite.SQLiteDatabase;
 import android.net.Uri;
@@ -21,10 +16,7 @@ import android.view.MenuItem;
 import android.view.View;
 import android.widget.AdapterView;
 import android.widget.GridView;
-import android.widget.ImageButton;
-import android.widget.RadioButton;
 import android.widget.SimpleCursorAdapter;
-import android.widget.Toast;
 import android.widget.AdapterView.OnItemClickListener;
 
 /**
@@ -35,7 +27,6 @@ public class History extends Activity {
 
     private SQLiteDatabase histDB = null;
     private Cursor vCursor;
-    private int pickedItem;
     private GridView historyGrid;
     final int CHOOSE_AN_IMAGE_REQUEST = 2910;
 
@@ -44,20 +35,44 @@ public class History extends Activity {
         public void onItemClick(
             @SuppressWarnings("unchecked") final AdapterView parent,
             final View v, final int position, final long id) {
-            // remove check from old image
-            for (int i = 0; i < parent.getChildCount(); i++) {
-                ((RadioButton) (parent.getChildAt(i)
-                    .findViewById(R.id.ImageRadio))).setChecked(false);
-            }
 
-            // set radio on current thumbnail
-            final RadioButton radio = (RadioButton) v
-                .findViewById(R.id.ImageRadio);
-            radio.setChecked(true);
+            Log.i("", "" + position);
 
-            pickedItem = position;
+            final Cursor item = (Cursor) historyGrid
+                .getItemAtPosition(position);
+
+            //start ImageDetails activity passing info about the image
+            final Intent intent = new Intent(getBaseContext(),
+                ImageDetails.class);
+            final String hash = item.getString(item.getColumnIndex("hash"));
+            intent.putExtra("hash", hash);
+            intent.putExtra("image_url", dbGetString(hash, "image_url"));
+            intent.putExtra("delete_hash", dbGetString(hash, "delete_hash"));
+            intent.putExtra("local_thumbnail", dbGetString(hash,
+                "local_thumbnail"));
+            startActivity(intent);
         }
     };
+
+    /** 
+     * This method does a self joining query that locates the thumbnail and 
+     * time uploaded so that it can be displayed in the gui sorted newest first
+     * 
+     * @return a cursor
+     */
+    private Cursor getCursor() {
+        try {
+            return histDB.rawQuery("SELECT ltb.hash as _id, ltb.hash as hash, "
+                + "ltb.value as local_thumbnail "
+                + "FROM imgur_history as ltb, imgur_history as tu "
+                + "WHERE tu.hash = ltb.hash "
+                + "AND ltb.key = 'local_thumbnail' "
+                + "AND tu.key='upload_time' " + "ORDER BY tu.value DESC", null);
+        } catch (final Exception e) {
+            Log.e(this.getClass().getName(), "Error with database", e);
+        }
+        return null;
+    }
 
     /**
      * This is used to get columns from the database that were not queried in
@@ -81,102 +96,15 @@ public class History extends Activity {
             }
             if (n > 0) {
                 c.moveToFirst();
-                return c.getString(c.getColumnIndex("value"));
+                final String returnString = c.getString(c
+                    .getColumnIndex("value"));
+                //make sure we close the cursor
+                c.close();
+                return returnString;
             }
         } catch (final Exception e) {
             Log.e(this.getClass().getName(), " error while getting " + col
                 + " from " + hash, e);
-        }
-        return null;
-    }
-
-    public void deleteClick(final View target) {
-        // ensure that there are images left
-        if ((historyGrid.getAdapter().getCount() > 0) && (pickedItem > -1)) {
-            final Cursor item = (Cursor) historyGrid
-                .getItemAtPosition(pickedItem);
-            if (item != null) {
-                // remove check from old image
-                for (int i = 0; i < historyGrid.getChildCount(); i++) {
-                    ((RadioButton) (historyGrid.getChildAt(i)
-                        .findViewById(R.id.ImageRadio))).setChecked(false);
-                }
-                final String hash = item.getString(item.getColumnIndex("hash"));
-                deleteImage(dbGetString(hash, "delete_hash"), hash,
-                    dbGetString(hash, "local_thumbnail"));
-                pickedItem = -1;
-                refreshImageGrid();
-            }
-        }
-    }
-
-    private void deleteImage(final String deleteHash, final String imageHash,
-        final String localThumbnail) {
-        try {
-            final HttpURLConnection conn = (HttpURLConnection) (new URL(
-                "http://imgur.com/api/delete/" + deleteHash + ".json"))
-                .openConnection();
-            final BufferedReader reader = new BufferedReader(
-                new InputStreamReader(conn.getInputStream()));
-            final StringBuilder rData = new StringBuilder();
-            String line;
-            while ((line = reader.readLine()) != null) {
-                rData.append(line).append('\n');
-            }
-
-            final JSONObject json = new JSONObject(rData.toString());
-            JSONObject data;
-            if (json.has("rsp")) {
-                data = json.getJSONObject("rsp");
-            } else if (json.has("error")) {
-                data = json.getJSONObject("error");
-            } else {
-                data = null;
-            }
-
-            if (data != null) {
-                if ((data.has("stat") && data.getString("stat").equals("ok"))
-                    || (data.has("error_code") && (data.getInt("error_code") == 4002))) {
-                    histDB.delete("imgur_history", "hash='" + imageHash + "'",
-                        null);
-                    try {
-                        final File f = new File(localThumbnail);
-                        f.delete();
-                    } catch (final NullPointerException e) {
-                    }
-                }
-            } else {
-                Toast.makeText(this,
-                    getString(R.string.delete_failed) + " " + rData.toString(),
-                    Toast.LENGTH_SHORT).show();
-                Log.i(this.getClass().getName(), "Delete Failed "
-                    + rData.toString());
-            }
-
-        } catch (final Exception e) {
-            Log.e(this.getClass().getName(), "Delete failed", e);
-            Toast.makeText(this,
-                getString(R.string.delete_failed) + " " + e.toString(),
-                Toast.LENGTH_SHORT).show();
-        }
-    }
-
-    /** 
-     * This method does a self joining query that locates the thumbnail and 
-     * time uploaded so that it can be displayed in the gui sorted newest first
-     * 
-     * @return a cursor
-     */
-    private Cursor getCursor() {
-        try {
-            return histDB.rawQuery("SELECT ltb.hash as _id, ltb.hash as hash, "
-                + "ltb.value as local_thumbnail "
-                + "FROM imgur_history as ltb, imgur_history as tu "
-                + "WHERE tu.hash = ltb.hash "
-                + "AND ltb.key = 'local_thumbnail' "
-                + "AND tu.key='upload_time' " + "ORDER BY tu.value DESC", null);
-        } catch (final Exception e) {
-            Log.e(this.getClass().getName(), "Error with database", e);
         }
         return null;
     }
@@ -193,8 +121,8 @@ public class History extends Activity {
                 // intent.setData(chosenImageUri);
                 intent.setAction(Intent.ACTION_SEND);
                 intent.putExtra(Intent.EXTRA_STREAM, chosenImageUri);
-                intent.setClass(this, LaunchUploadDummy.class);
-                startActivity(intent);
+                intent.setClass(this, ImgurUpload.class);
+                startService(intent);
             }
         }
     }
@@ -203,6 +131,28 @@ public class History extends Activity {
     protected void onCreate(final Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
 
+        //see if we need to pass a call to upload to the upload service
+        final Intent intent = getIntent();
+        final Bundle extras = intent.getExtras();
+
+        //upload a new image
+        if (Intent.ACTION_SEND.equals(intent.getAction()) && (extras != null)
+            && extras.containsKey(Intent.EXTRA_STREAM)) {
+
+            final Uri uri = (Uri) extras.getParcelable(Intent.EXTRA_STREAM);
+            if (uri != null) {
+                final Intent passIntent = new Intent();
+                // intent.setData(chosenImageUri);
+                passIntent.setAction(Intent.ACTION_SEND);
+                passIntent.putExtra(Intent.EXTRA_STREAM, uri);
+                passIntent.setClass(this, ImgurUpload.class);
+                startService(passIntent);
+                finish();
+                return;
+            }
+        }
+
+        //continue normally :D
         if (histDB == null) {
             final HistoryDatabase histData = new HistoryDatabase(this);
             histDB = histData.getWritableDatabase();
@@ -223,34 +173,9 @@ public class History extends Activity {
             historyGrid = (GridView) findViewById(R.id.HistoryGridView);
             historyGrid.setAdapter(entry);
             historyGrid.setOnItemClickListener(mMessageClickedHandler);
-
-            {
-                ((ImageButton) findViewById(R.id.ImageButtonShare))
-                    .setOnClickListener(new View.OnClickListener() {
-                        @Override
-                        public void onClick(final View arg0) {
-                            shareImage(arg0);
-                        }
-                    });
-                ((ImageButton) findViewById(R.id.ImageButtonDelete))
-                    .setOnClickListener(new View.OnClickListener() {
-                        @Override
-                        public void onClick(final View arg0) {
-                            deleteClick(arg0);
-                        }
-                    });
-                ((ImageButton) findViewById(R.id.ImageButtonLaunchBrowser))
-                    .setOnClickListener(new View.OnClickListener() {
-                        @Override
-                        public void onClick(final View arg0) {
-                            viewImage(arg0);
-                        }
-                    });
-            }
         } else {
             setContentView(R.layout.info);
         }
-
     }
 
     /**
@@ -267,6 +192,9 @@ public class History extends Activity {
         // display about page
         menu.findItem(R.id.AboutMenu).setIntent(
             new Intent(this, LaunchedInfo.class));
+
+        menu.findItem(R.id.SettingsMenu).setIntent(
+            new Intent(this, ImgurPreferences.class));
 
         return true;
     }
@@ -295,17 +223,29 @@ public class History extends Activity {
             final HistoryDatabase histData = new HistoryDatabase(this);
             histDB = histData.getWritableDatabase();
         }
+
+        //get updates about new images that have been uploaded
+        registerReceiver(receiver, new IntentFilter(
+            ImgurUpload.BROADCAST_ACTION));
+
         refreshImageGrid();
     }
 
     @Override
-    public void onStop() {
-        super.onStop();
+    public void onPause() {
+        super.onPause();
         // close cursor
         vCursor.close();
         // close database
         histDB.close();
         histDB = null;
+        unregisterReceiver(receiver);
+    }
+
+    @Override
+    public void onStop() {
+        super.onStop();
+
     }
 
     /**
@@ -316,28 +256,6 @@ public class History extends Activity {
             vCursor = getCursor();
             ((SimpleCursorAdapter) historyGrid.getAdapter())
                 .changeCursor(vCursor);
-        }
-    }
-
-    /**
-     * This is the callback from the UI share button
-     */
-    public void shareImage(final View target) {
-        // ensure that there are images left
-        if ((historyGrid.getAdapter().getCount() > 0) && (pickedItem > -1)) {
-            final Cursor item = (Cursor) historyGrid
-                .getItemAtPosition(pickedItem);
-            if (item != null) {
-                final Intent shareLinkIntent = new Intent(Intent.ACTION_SEND);
-
-                shareLinkIntent.putExtra(Intent.EXTRA_TEXT, dbGetString(item
-                    .getString(item.getColumnIndex("hash")), "image_url"));
-                shareLinkIntent.setType("text/plain");
-
-                History.this.startActivity(Intent.createChooser(
-                    shareLinkIntent, getResources().getString(
-                        R.string.share_via)));
-            }
         }
     }
 
@@ -354,20 +272,12 @@ public class History extends Activity {
             getString(R.string.choose_a_viewer)), CHOOSE_AN_IMAGE_REQUEST);
     }
 
-    /**
-     * This is the call back from the browser launch button
-     */
-    public void viewImage(final View target) {
-        // ensure that there are images left
-        if ((historyGrid.getAdapter().getCount() > 0) && (pickedItem > -1)) {
-            final Cursor item = (Cursor) historyGrid
-                .getItemAtPosition(pickedItem);
-            if (item != null) {
-                final Intent viewIntent = new Intent(
-                    "android.intent.action.VIEW", Uri.parse(dbGetString(item
-                        .getString(item.getColumnIndex("hash")), "image_url")));
-                startActivity(viewIntent);
+    private BroadcastReceiver receiver = new BroadcastReceiver() {
+        @Override
+        public void onReceive(final Context context, final Intent intent) {
+            if (intent.getAction().equals(ImgurUpload.BROADCAST_ACTION)) {
+                refreshImageGrid();
             }
         }
-    }
+    };
 }
