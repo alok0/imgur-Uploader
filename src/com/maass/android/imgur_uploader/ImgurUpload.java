@@ -205,9 +205,7 @@ public class ImgurUpload extends Service {
             assetFileDescriptor.close();
 
             // Create custom progress notification
-            mProgressNotification = new Notification(R.drawable.icon,
-                getString(R.string.upload_in_progress), System
-                    .currentTimeMillis());
+            mProgressNotification = new Notification();
             // set as ongoing
             mProgressNotification.flags |= Notification.FLAG_ONGOING_EVENT;
             // set custom view to notification
@@ -219,11 +217,6 @@ public class ImgurUpload extends Service {
             contentView.setProgressBar(R.id.UploadProgress, totalFileLength, 0,
                 true);
             mProgressNotification.contentView = contentView;
-            //empty intent for the notification
-            final Intent progressIntent = new Intent();
-            final PendingIntent contentIntent = PendingIntent.getActivity(this,
-                0, progressIntent, 0);
-            mProgressNotification.contentIntent = contentIntent;
             // add notification to manager
             mNotificationManager.notify(NOTIFICATION_ID, mProgressNotification);
 
